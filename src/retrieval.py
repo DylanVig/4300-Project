@@ -481,8 +481,7 @@ def _svd_scores(svd, svd_matrix_normed, query_vec):
 # every hit at search time so the frontend can explain the raw cosine
 # score to the user.
 
-N_SVD_THEMES = 15  # secondary-SVD dimensionality used purely for labeling
-TERMS_PER_THEME_LABEL = 3
+N_TOPICS = 28          # NMF components used purely for theme labels
 TAGS_PER_RESULT = 3
 
 # Absolute quality thresholds per method. Tunable constants — see
@@ -549,89 +548,107 @@ def _top_shared_terms(vectorizer, query_vec, doc_vec, stem_to_surface=None,
     return [_unstem(str(feats[indices[i]]), stem_to_surface) for i in order]
 
 
-def _fit_theme_svd(tfidf_matrix, vectorizer, stem_to_surface=None,
-                   n_themes=N_SVD_THEMES,
-                   terms_per_label=TERMS_PER_THEME_LABEL, random_state=42):
-    """Fit a small secondary SVD purely for per-result tag labeling.
+def _fit_topic_nmf(tfidf_matrix, vectorizer, stem_to_surface,
+                   n_topics=N_TOPICS, random_state=42, required_labels=None):
+    """Fit a small NMF over the TF-IDF matrix for per-result topic labels.
 
-    The primary 100-dim SVD is tuned for retrieval recall; clustering its
-    dims for labels proved brittle (high-variance dims collapse into a
-    single cluster). Instead we fit a second, smaller ``TruncatedSVD``
-    whose dims are orthogonal by construction and each capture a distinct
-    semantic axis. Each dim gets a human-readable label from its top
-    ``terms_per_label`` terms in ``components_``, un-stemmed for display
-    via *stem_to_surface* when provided.
+    NMF components are non-negative and additive, so each component
+    captures a cluster of co-occurring terms (a topic) rather than an
+    orthogonal contrast axis. Each topic gets a single-term label: the
+    highest IDF-weighted term in the component, deduped across topics so
+    each visible concept appears on at most one chip.
 
-    Each axis has two poles. ``labels_pos`` describes the positive end
-    (top terms of ``components_[dim]``); ``labels_neg`` describes the
-    negative end (bottom terms). At tag time the caller picks the label
-    matching the query+doc's shared sign — otherwise a ``squat`` query
-    loading *negatively* on a ``dumbbell+biceps+triceps`` axis would be
-    tagged with those positive-pole terms, which reads backwards.
-
-    Returns ``(theme_svd, theme_matrix, labels_pos, labels_neg, baseline)``.
-    ``theme_matrix`` is unnormalized (signed), shape ``(n_docs, n_themes)``.
-    ``baseline`` is per-theme mean absolute loading across the corpus,
-    used by ``_top_themes`` for distinctiveness weighting.
+    ``required_labels`` is an optional list of concept strings (e.g. muscle
+    group names, program goal categories) that must appear in the final label
+    set. After the initial IDF-weighted pass, any required label not yet
+    covered is assigned to the component that loads most heavily on that
+    concept's most-discriminative vocabulary token, overriding whatever label
+    that component received in the first pass. This guarantees coverage of
+    important concepts that IDF suppresses (e.g. "back" is so common its IDF
+    is low, so it loses to "lats" in an unguided ranking).
     """
-    n_comp = max(1, min(n_themes, min(tfidf_matrix.shape) - 1))
-    theme_svd = TruncatedSVD(n_components=n_comp, random_state=random_state)
-    theme_matrix = theme_svd.fit_transform(tfidf_matrix)
+    from sklearn.decomposition import NMF
+    n_comp = max(1, min(n_topics, min(tfidf_matrix.shape) - 1))
+    nmf = NMF(n_components=n_comp, init="nndsvda",
+              random_state=random_state, max_iter=400)
+    doc_topics = nmf.fit_transform(tfidf_matrix)
     feats = vectorizer.get_feature_names_out()
-    labels_pos, labels_neg = [], []
-    for dim in range(n_comp):
-        comp = theme_svd.components_[dim]
-        order = np.argsort(comp)
-        top_pos = order[::-1][:terms_per_label]
-        top_neg = order[:terms_per_label]
-        labels_pos.append("+".join(_unstem(str(feats[i]), stem_to_surface)
-                                   for i in top_pos))
-        labels_neg.append("+".join(_unstem(str(feats[i]), stem_to_surface)
-                                   for i in top_neg))
-    # Small floor keeps rarely-loaded themes from dividing by ~0 and
-    # blowing up the weighted score when a doc happens to load on them.
-    baseline = np.maximum(np.mean(np.abs(theme_matrix), axis=0), 1e-6)
-    return theme_svd, theme_matrix, labels_pos, labels_neg, baseline
+    idf = vectorizer.idf_
+
+    labels, used = [], set()
+    for topic_idx in range(n_comp):
+        weighted = nmf.components_[topic_idx] * idf
+        for i in np.argsort(weighted)[::-1]:
+            term = _unstem(str(feats[i]), stem_to_surface)
+            if term not in used:
+                labels.append(term)
+                used.add(term)
+                break
+        else:
+            term = _unstem(str(feats[np.argmax(weighted)]), stem_to_surface)
+            labels.append(term)
+            used.add(term)
+
+    if required_labels:
+        feat_to_idx = {str(f): i for i, f in enumerate(feats)}
+        required_set = {r.lower().strip() for r in required_labels}
+        for req in required_labels:
+            req_display = req.lower().strip()
+            if req_display in used:
+                continue
+            tokens = [_stem(_apply_alias(t))
+                      for t in re.findall(r'[a-z]+', req_display)]
+            tokens = [t for t in tokens
+                      if t in feat_to_idx and t not in _STOP_WORDS and len(t) > 1]
+            if not tokens:
+                continue
+            # Use the most discriminative vocab token (highest IDF) to find
+            # which NMF component best represents this concept.
+            key = max(tokens, key=lambda t: idf[feat_to_idx[t]])
+            feat_idx = feat_to_idx[key]
+            loadings = nmf.components_[:, feat_idx]
+            # Prefer a component whose current label is not already a required
+            # label — that avoids displacing sibling concepts that were already
+            # correctly assigned (e.g. "middle back" shouldn't steal "lats").
+            best_comp = None
+            for c in np.argsort(loadings)[::-1]:
+                if loadings[c] == 0:
+                    break
+                if labels[c] not in required_set:
+                    best_comp = int(c)
+                    break
+            if best_comp is None:
+                continue  # no spare component available; skip rather than displace
+            old = labels[best_comp]
+            used.discard(old)
+            labels[best_comp] = req_display
+            used.add(req_display)
+
+    baseline = np.maximum(doc_topics.mean(axis=0), 1e-6)
+    return nmf, doc_topics, labels, baseline
 
 
-def _top_themes(query_theme_vec, doc_theme_vec, theme_baseline=None,
-                k=TAGS_PER_RESULT, query_weak_ratio=0.2):
-    """Top-k theme axes explaining why ``doc_theme_vec`` matched the query.
+def _top_topics(query_topic_vec, doc_topic_vec, baseline=None,
+                k=TAGS_PER_RESULT, query_weak_ratio=0.15):
+    """Top-k NMF topic indices explaining why ``doc_topic_vec`` matched the query.
 
-    Contribution per axis = ``q_t * doc_t`` (signed, so negative-negative
-    alignment still counts as positive match while opposite signs cancel).
-    When *theme_baseline* is provided, divide by it so tags surface themes
-    this doc stands out on *for this query*, rather than whichever axes
-    have the highest raw variance across the corpus.
-
-    Themes where the query loads weakly relative to its own max (below
-    ``query_weak_ratio × max|q|``) are dropped first — they'd otherwise
-    tag matches with axes the query barely cares about.
-
-    Returns a list of ``(theme_idx, sign)`` tuples, where ``sign`` is
-    +1 if query and doc both load positive on that axis (describe the
-    positive pole) and -1 if both negative (describe the negative pole).
-    The caller picks the appropriate pole label.
+    NMF loadings are non-negative so there is no sign branch. Contribution
+    per topic = ``q_t * doc_t``, optionally divided by per-topic corpus
+    mean for distinctiveness. Topics where the query loads weakly (below
+    ``query_weak_ratio × max``) are masked out first.
     """
-    q_abs_max = float(np.max(np.abs(query_theme_vec))) if query_theme_vec.size else 0.0
-    if q_abs_max == 0.0:
+    q_max = float(query_topic_vec.max()) if query_topic_vec.size else 0.0
+    if q_max == 0.0:
         return []
-    q_mask = np.abs(query_theme_vec) >= query_weak_ratio * q_abs_max
-
-    contributions = query_theme_vec * doc_theme_vec
-    if theme_baseline is not None:
-        contributions = contributions / theme_baseline
-    contributions = np.where(q_mask, contributions, -np.inf)
-    if not np.any(contributions > 0):
+    mask = query_topic_vec >= query_weak_ratio * q_max
+    contrib = query_topic_vec * doc_topic_vec
+    if baseline is not None:
+        contrib = contrib / baseline
+    contrib = np.where(mask, contrib, -np.inf)
+    if not np.any(contrib > 0):
         return []
-    order = np.argsort(contributions)[::-1]
-    out = []
-    for t in order[:k]:
-        if contributions[t] <= 0:
-            break
-        sign = 1 if query_theme_vec[t] >= 0 else -1
-        out.append((int(t), sign))
-    return out
+    order = np.argsort(contrib)[::-1][:k]
+    return [int(t) for t in order if contrib[t] > 0]
 
 
 def _match_quality(score, top_score, method):
@@ -883,13 +900,13 @@ class ExerciseSearcher:
         # for display (e.g. `tricep` → `triceps`, `explos` → `explosive`).
         self.stem_to_surface = _build_stem_surface_map(docs)
 
-        # Secondary, smaller SVD (15 dims) used only for labeling the
-        # "why this matched" tags on the SVD search tab. Kept separate
-        # from the retrieval SVD so retrieval quality is unaffected.
-        (self.theme_svd, self.theme_matrix,
-         self.svd_theme_labels_pos, self.svd_theme_labels_neg,
-         self.theme_baseline) = _fit_theme_svd(
-            self.tfidf_matrix, self.vectorizer, self.stem_to_surface)
+        # NMF topic model — label-only, does not affect retrieval.
+        # Pass all known muscle groups as required labels so IDF-suppressed
+        # terms like "back" are guaranteed their own topic.
+        (self.topic_nmf, self.topic_matrix,
+         self.topic_labels, self.topic_baseline) = _fit_topic_nmf(
+            self.tfidf_matrix, self.vectorizer, self.stem_to_surface,
+            required_labels=sorted(self.all_muscles))
 
         # Build a length-bucketed vocabulary index for O(1) candidate lookup
         # during spell correction.  Keys are token lengths; values are lists of
@@ -992,9 +1009,8 @@ class ExerciseSearcher:
 
         expanded = _expand_query(corrected_query)
         query_vec = self.vectorizer.transform([expanded])
-        # Project the query into the secondary theme space once so per-result
-        # tag attribution is a simple dot product in the loop.
-        query_theme_vec = self.theme_svd.transform(query_vec)[0] if method == "svd" else None
+        query_topic_vec = (self.topic_nmf.transform(query_vec)[0]
+                           if method == "svd" else None)
         if method == "svd":
             scores = _svd_scores(self.svd, self.svd_matrix_normed, query_vec)
         else:
@@ -1036,11 +1052,16 @@ class ExerciseSearcher:
                 break
             ex = self.exercises[idx]
             if method == "svd":
-                theme_hits = _top_themes(query_theme_vec, self.theme_matrix[idx],
-                                         self.theme_baseline)
-                tags = [(self.svd_theme_labels_pos[t] if sign > 0
-                         else self.svd_theme_labels_neg[t])
-                        for t, sign in theme_hits]
+                topic_hits = _top_topics(query_topic_vec, self.topic_matrix[idx],
+                                         self.topic_baseline)
+                tags = [self.topic_labels[t] for t in topic_hits]
+                # Guarantee the primary muscle appears — NMF can't always separate
+                # co-occurring muscle groups (e.g. middle back vs lats on rows).
+                primary = (ex.get("primaryMuscles") or [])
+                if primary:
+                    m = primary[0].lower()
+                    if m not in tags:
+                        tags = [m] + tags[:TAGS_PER_RESULT - 1]
             else:
                 tags = _top_shared_terms(self.vectorizer, query_vec,
                                          self.tfidf_matrix[idx],
@@ -1212,12 +1233,16 @@ class ProgramSearcher:
         # for display.
         self.stem_to_surface = _build_stem_surface_map(docs)
 
-        # Secondary, smaller SVD for SVD-tab tag labeling — see
-        # ExerciseSearcher for rationale.
-        (self.theme_svd, self.theme_matrix,
-         self.svd_theme_labels_pos, self.svd_theme_labels_neg,
-         self.theme_baseline) = _fit_theme_svd(
-            self.tfidf_matrix, self.vectorizer, self.stem_to_surface)
+        # NMF topic model — label-only, does not affect retrieval.
+        # Collect all distinct goal categories to guarantee coverage.
+        goal_cats = set()
+        for row in self.programs:
+            for g in _parse_json_list(row.get('goal', '')):
+                goal_cats.add(g.lower().strip())
+        (self.topic_nmf, self.topic_matrix,
+         self.topic_labels, self.topic_baseline) = _fit_topic_nmf(
+            self.tfidf_matrix, self.vectorizer, self.stem_to_surface,
+            required_labels=sorted(goal_cats))
 
         self.vocab_by_length = {}
         for term in self.vectorizer.vocabulary_:
@@ -1292,7 +1317,8 @@ class ProgramSearcher:
 
         corrected_query = " ".join(corrected_display)
         query_vec = self.vectorizer.transform([corrected_query])
-        query_theme_vec = self.theme_svd.transform(query_vec)[0] if method == "svd" else None
+        query_topic_vec = (self.topic_nmf.transform(query_vec)[0]
+                           if method == "svd" else None)
         if method == "svd":
             scores = _svd_scores(self.svd, self.svd_matrix_normed, query_vec)
         else:
@@ -1307,11 +1333,9 @@ class ProgramSearcher:
             row = self.programs[idx]
             title = row.get("title", "")
             if method == "svd":
-                theme_hits = _top_themes(query_theme_vec, self.theme_matrix[idx],
-                                         self.theme_baseline)
-                tags = [(self.svd_theme_labels_pos[t] if sign > 0
-                         else self.svd_theme_labels_neg[t])
-                        for t, sign in theme_hits]
+                topic_hits = _top_topics(query_topic_vec, self.topic_matrix[idx],
+                                         self.topic_baseline)
+                tags = [self.topic_labels[t] for t in topic_hits]
             else:
                 tags = _top_shared_terms(self.vectorizer, query_vec,
                                          self.tfidf_matrix[idx],
