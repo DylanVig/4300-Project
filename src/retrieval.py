@@ -545,7 +545,7 @@ def _top_shared_terms(vectorizer, query_vec, doc_vec, stem_to_surface=None,
         return []
     order = np.argsort(data)[::-1][:k]
     feats = vectorizer.get_feature_names_out()
-    return [_unstem(str(feats[indices[i]]), stem_to_surface) for i in order]
+    return [(_unstem(str(feats[indices[i]]), stem_to_surface), float(data[i])) for i in order]
 
 
 def _fit_topic_nmf(tfidf_matrix, vectorizer, stem_to_surface,
@@ -648,7 +648,32 @@ def _top_topics(query_topic_vec, doc_topic_vec, baseline=None,
     if not np.any(contrib > 0):
         return []
     order = np.argsort(contrib)[::-1][:k]
-    return [int(t) for t in order if contrib[t] > 0]
+    # Rank by joint q×d/baseline; display doc-only d/baseline so the score is
+    # non-zero even when the query activates a topic only weakly.
+    display = doc_topic_vec / baseline if baseline is not None else doc_topic_vec
+    return [(int(t), float(display[t])) for t in order if contrib[t] > 0]
+
+
+def _svd_doc_concept_score(concept, doc_topic_vec, nmf, feat_to_idx, idf,
+                           baseline=None, doc_tfidf_vec=None):
+    """Baseline-normalized doc-only NMF activation for ``concept``."""
+    tokens = [_stem(_apply_alias(t)) for t in re.findall(r'[a-z]+', concept.lower())]
+    tokens = [t for t in tokens if t in feat_to_idx and t not in _STOP_WORDS and len(t) > 1]
+    if not tokens:
+        return 0.0
+    key = max(tokens, key=lambda t: idf[feat_to_idx[t]])
+    loadings = nmf.components_[:, feat_to_idx[key]]
+    best = int(np.argmax(loadings))
+    if loadings[best] > 0:
+        raw = float(doc_topic_vec[best])
+        if baseline is not None:
+            raw = raw / float(baseline[best])
+        return raw
+    if doc_tfidf_vec is not None:
+        return float(doc_tfidf_vec[0, feat_to_idx[key]])
+    return 0.0
+
+
 
 
 def _match_quality(score, top_score, method):
@@ -1046,37 +1071,59 @@ class ExerciseSearcher:
 
         top_indices = np.argsort(scores)[::-1][:k]
         top_score = float(scores.max()) if scores.size else 0.0
-        results = []
+
+        # Precompute once for tag helpers
+        feats = self.vectorizer.get_feature_names_out()
+        feat_to_idx = {str(f): i for i, f in enumerate(feats)}
+        idf = self.vectorizer.idf_
+
+        # Pass A — collect raw tags without normalizing
+        raw_results = []
         for idx in top_indices:
             if scores[idx] <= 0:
                 break
             ex = self.exercises[idx]
+            doc_topic_vec = self.topic_matrix[idx]
+            doc_tfidf_vec = self.tfidf_matrix[idx]
             if method == "svd":
-                topic_hits = _top_topics(query_topic_vec, self.topic_matrix[idx],
+                topic_hits = _top_topics(query_topic_vec, doc_topic_vec,
                                          self.topic_baseline)
-                tags = [self.topic_labels[t] for t in topic_hits]
+                pos_tags = [(self.topic_labels[t], s) for t, s in topic_hits]
                 # Guarantee the primary muscle appears — NMF can't always separate
                 # co-occurring muscle groups (e.g. middle back vs lats on rows).
                 primary = (ex.get("primaryMuscles") or [])
                 if primary:
                     m = primary[0].lower()
-                    if m not in tags:
-                        tags = [m] + tags[:TAGS_PER_RESULT - 1]
+                    if m not in [lbl for lbl, _ in pos_tags]:
+                        ms = _svd_doc_concept_score(m, doc_topic_vec,
+                                                    self.topic_nmf, feat_to_idx, idf,
+                                                    self.topic_baseline, doc_tfidf_vec)
+                        pos_tags = [(m, ms)] + pos_tags[:TAGS_PER_RESULT - 1]
             else:
-                tags = _top_shared_terms(self.vectorizer, query_vec,
-                                         self.tfidf_matrix[idx],
-                                         self.stem_to_surface)
+                pos_tags = _top_shared_terms(self.vectorizer, query_vec,
+                                             doc_tfidf_vec, self.stem_to_surface)
+            raw_results.append({"idx": idx, "ex": ex, "pos": pos_tags})
+
+        # Global normalization so scores are comparable across results
+        global_max_pos = max((s for r in raw_results for _, s in r["pos"] if s > 0), default=1.0)
+
+        # Pass B — normalize and assemble final results
+        results = []
+        for r in raw_results:
+            idx = r["idx"]
+            tags = [{"label": lbl, "score": round(s * 100.0 / global_max_pos)}
+                    for lbl, s in r["pos"] if s > 0]
             results.append({
-                "name": ex.get("name"),
+                "name": r["ex"].get("name"),
                 "score": round(float(scores[idx]), 4),
                 "match_quality": _match_quality(float(scores[idx]), top_score, method),
                 "tags": tags,
-                "primaryMuscles": ex.get("primaryMuscles", []),
-                "secondaryMuscles": ex.get("secondaryMuscles", []),
-                "level": ex.get("level"),
-                "equipment": ex.get("equipment"),
-                "category": ex.get("category"),
-                "instructions": ex.get("instructions", []),
+                "primaryMuscles": r["ex"].get("primaryMuscles", []),
+                "secondaryMuscles": r["ex"].get("secondaryMuscles", []),
+                "level": r["ex"].get("level"),
+                "equipment": r["ex"].get("equipment"),
+                "category": r["ex"].get("category"),
+                "instructions": r["ex"].get("instructions", []),
             })
         return {
             "results": results,
@@ -1326,20 +1373,38 @@ class ProgramSearcher:
 
         top_indices = np.argsort(scores)[::-1][:k]
         top_score = float(scores.max()) if scores.size else 0.0
-        results = []
+
+        feats = self.vectorizer.get_feature_names_out()
+        feat_to_idx = {str(f): i for i, f in enumerate(feats)}
+        idf = self.vectorizer.idf_
+
+        # Pass A — collect raw tags without normalizing
+        raw_results = []
         for idx in top_indices:
             if scores[idx] <= 0:
                 break
             row = self.programs[idx]
-            title = row.get("title", "")
+            doc_topic_vec = self.topic_matrix[idx]
+            doc_tfidf_vec = self.tfidf_matrix[idx]
             if method == "svd":
-                topic_hits = _top_topics(query_topic_vec, self.topic_matrix[idx],
+                topic_hits = _top_topics(query_topic_vec, doc_topic_vec,
                                          self.topic_baseline)
-                tags = [self.topic_labels[t] for t in topic_hits]
+                pos_tags = [(self.topic_labels[t], s) for t, s in topic_hits]
             else:
-                tags = _top_shared_terms(self.vectorizer, query_vec,
-                                         self.tfidf_matrix[idx],
-                                         self.stem_to_surface)
+                pos_tags = _top_shared_terms(self.vectorizer, query_vec,
+                                             doc_tfidf_vec, self.stem_to_surface)
+            raw_results.append({"idx": idx, "row": row, "pos": pos_tags})
+
+        global_max_pos = max((s for r in raw_results for _, s in r["pos"] if s > 0), default=1.0)
+
+        # Pass B — normalize and assemble final results
+        results = []
+        for r in raw_results:
+            idx = r["idx"]
+            row = r["row"]
+            title = row.get("title", "")
+            tags = [{"label": lbl, "score": round(s * 100.0 / global_max_pos)}
+                    for lbl, s in r["pos"] if s > 0]
             results.append({
                 "title": title,
                 "description": row.get("description", "") or "",

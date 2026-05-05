@@ -6,11 +6,13 @@
 
 export type MatchQuality = 'strong' | 'moderate' | 'weak';
 
+export interface Tag { label: string; score: number }
+
 export interface Exercise {
   name: string;
   score: number;
   match_quality?: MatchQuality;
-  tags?: string[];
+  tags?: Tag[];
   primaryMuscles: string[];
   secondaryMuscles: string[];
   level: string | null;
@@ -48,7 +50,7 @@ export interface Program {
   program_length_weeks: number | null;
   score: number;
   match_quality?: MatchQuality;
-  tags?: string[];
+  tags?: Tag[];
   schedule: ProgramScheduleEntry[];
 }
 

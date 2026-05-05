@@ -11,6 +11,17 @@ const QUALITY_COPY: Record<string, string> = {
   weak: 'WEAK',
 };
 
+function TagDots({ score }: { score: number }) {
+  const filled = score === 0 ? 0 : score <= 25 ? 1 : score <= 50 ? 2 : score <= 75 ? 3 : 4;
+  return (
+    <span className="tag-dots" aria-label={`${filled} of 4`}>
+      {Array.from({ length: 4 }, (_, i) => (
+        <span key={i} className={`tag-dot${i < filled ? ' tag-dot--on' : ''}`} />
+      ))}
+    </span>
+  );
+}
+
 function RankNumeral({ n }: { n: number }) {
   return <span className="rank-numeral">{String(n).padStart(2, '0')}</span>;
 }
@@ -97,7 +108,10 @@ export default function ProgramCard({
         <div className="pg-card__tags">
           <span className="ex-card__tags-label">WHY IT MATCHED</span>
           {program.tags.map((t, i) => (
-            <span key={i} className="tag">{t}</span>
+            <span key={i} className="tag">
+              {t.label}
+              <TagDots score={t.score} />
+            </span>
           ))}
         </div>
       )}

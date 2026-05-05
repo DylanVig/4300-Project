@@ -937,6 +937,9 @@ button { font-family: inherit; cursor: pointer; }
   margin-right: 4px;
 }
 .tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-family: var(--mono);
   font-size: 10px;
   padding: 2px 7px;
@@ -944,6 +947,24 @@ button { font-family: inherit; cursor: pointer; }
   color: var(--text-dim);
   border: 1px solid var(--border);
   border-radius: 2px;
+}
+
+.tag-dots {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.tag-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.2;
+}
+
+.tag-dot--on {
+  opacity: 1;
 }
 
 /* ── Card actions ─────────────────────────────────────────────────────── */
