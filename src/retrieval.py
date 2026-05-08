@@ -276,6 +276,7 @@ def _tokenize_and_stem(text):
     return [_stem(_apply_alias(t)) for t in tokens if t not in _STOP_WORDS and len(t) > 1]
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'datasets', 'exercises_free_db.json')
+EXERCISE_VIDEOS_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'datasets', 'exercise_videos.json')
 PROGRAMS_CSV_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'datasets', 'programs_cleaned.csv')
 COMMON_ENGLISH_PATH = os.path.join(os.path.dirname(__file__), '..', 'data',
                                    'google-10000-english-no-swears.txt')
@@ -897,6 +898,17 @@ class ExerciseSearcher:
         with open(DATA_PATH, 'r', encoding='utf-8') as f:
             self.exercises = json.load(f)
 
+        # Optional sidecar of YouTube video IDs keyed by exercise id.
+        # Generated offline by data/fetch_exercise_videos.py. Missing or
+        # malformed file is non-fatal — the searcher just returns video_id=None.
+        self._video_map = {}
+        if os.path.exists(EXERCISE_VIDEOS_PATH):
+            try:
+                with open(EXERCISE_VIDEOS_PATH, 'r', encoding='utf-8') as f:
+                    self._video_map = json.load(f) or {}
+            except (json.JSONDecodeError, OSError):
+                self._video_map = {}
+
         # Canonical muscle vocabulary, harvested from the dataset itself so
         # query→muscle mapping stays in sync with whatever the corpus uses.
         muscle_set = set()
@@ -1124,6 +1136,7 @@ class ExerciseSearcher:
                 "equipment": r["ex"].get("equipment"),
                 "category": r["ex"].get("category"),
                 "instructions": r["ex"].get("instructions", []),
+                "video_id": (self._video_map.get(r["ex"].get("id"), {}) or {}).get("video_id"),
             })
         return {
             "results": results,

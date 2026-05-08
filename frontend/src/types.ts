@@ -19,6 +19,7 @@ export interface Exercise {
   equipment: string | null;
   category: string | null;
   instructions: string[];
+  video_id?: string | null;
 }
 
 export type SearchMethod = 'tfidf' | 'svd';
