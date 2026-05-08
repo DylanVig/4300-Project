@@ -8,6 +8,7 @@ import {
 } from './types';
 import ExerciseCard, { type PlanState } from './ExerciseCard';
 import ProgramCard from './ProgramCard';
+import RagSummary from './RagSummary';
 import MuscleGraph from './MuscleGraph';
 import MuscleRadar from './MuscleRadar';
 import MuscleMap from './MuscleMap';
@@ -389,6 +390,13 @@ export default function App() {
     setExpandedCards((prev) => ({ ...prev, [idx]: !prev[idx] }));
   };
 
+  const scrollToCard = (cssId: string, index: number, isExercise: boolean) => {
+    if (isExercise) setSelectedExerciseIndex(index);
+    requestAnimationFrame(() => {
+      document.getElementById(cssId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  };
+
   const currentMethod = activeTab === 'exercises' ? exerciseMethod : programMethod;
 
   const displayedExercises = exerciseView === 'rag' ? exerciseRag.results : exercises;
@@ -517,49 +525,54 @@ export default function App() {
           <>
             <div className="rail__section">
               <div className="rail__section-label">FILTERS</div>
-              <div className="filters__sub-label">DIFFICULTY</div>
-              <div className="diff-toggle">
-                <button
-                  type="button"
-                  className={`diff ${difficulty === '' ? 'is-active' : ''}`}
-                  onClick={() => changeDifficulty('')}
-                >
-                  ANY
-                </button>
-                {DIFFICULTY_OPTIONS.map((opt) => (
-                  <button
-                    key={opt}
-                    type="button"
-                    className={`diff ${difficulty === opt ? 'is-active' : ''}`}
-                    onClick={() => changeDifficulty(opt)}
-                  >
-                    {opt.toUpperCase()}
-                  </button>
-                ))}
-              </div>
               <button
                 type="button"
                 className="filter-toggle"
                 onClick={() => setShowEquipment((s) => !s)}
               >
-                <span className="filter-toggle__label">EQUIPMENT</span>
-                {selectedEquipment.length > 0 && (
-                  <span className="filter-toggle__count">{selectedEquipment.length}</span>
+                <span className="filter-toggle__label">EQUIPMENT AND DIFFICULTY</span>
+                {(selectedEquipment.length + (difficulty ? 1 : 0)) > 0 && (
+                  <span className="filter-toggle__count">
+                    {selectedEquipment.length + (difficulty ? 1 : 0)}
+                  </span>
                 )}
                 <span className={`chev ${showEquipment ? 'chev--up' : ''}`}>↓</span>
               </button>
               {showEquipment && (
-                <div className="chip-grid">
-                  {EQUIPMENT_OPTIONS.map((opt) => (
+                <div className="filter-panel">
+                  <div className="filters__sub-label">DIFFICULTY</div>
+                  <div className="diff-toggle">
                     <button
-                      key={opt}
                       type="button"
-                      className={`chip ${selectedEquipment.includes(opt) ? 'is-active' : ''}`}
-                      onClick={() => toggleEquipment(opt)}
+                      className={`diff ${difficulty === '' ? 'is-active' : ''}`}
+                      onClick={() => changeDifficulty('')}
                     >
-                      {opt}
+                      ANY
                     </button>
-                  ))}
+                    {DIFFICULTY_OPTIONS.map((opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        className={`diff ${difficulty === opt ? 'is-active' : ''}`}
+                        onClick={() => changeDifficulty(opt)}
+                      >
+                        {opt.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="filters__sub-label filters__sub-label--gap">EQUIPMENT</div>
+                  <div className="chip-grid">
+                    {EQUIPMENT_OPTIONS.map((opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        className={`chip ${selectedEquipment.includes(opt) ? 'is-active' : ''}`}
+                        onClick={() => toggleEquipment(opt)}
+                      >
+                        {opt}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -701,7 +714,11 @@ export default function App() {
               {exerciseView === 'rag' && useLlm && !exerciseRag.loading && exerciseRag.summary && (
                 <div className="rag-summary">
                   <span className="rag-summary__label">AI SUMMARY</span>
-                  <p className="rag-summary__text">{exerciseRag.summary}</p>
+                  <RagSummary
+                    summary={exerciseRag.summary}
+                    items={exerciseRag.results.map((e) => ({ name: e.name }))}
+                    onPick={(i) => scrollToCard(`ex-card-${i + 1}`, i, true)}
+                  />
                 </div>
               )}
 
@@ -886,7 +903,11 @@ export default function App() {
               {programView === 'rag' && useLlm && !programRag.loading && programRag.summary && (
                 <div className="rag-summary">
                   <span className="rag-summary__label">AI SUMMARY</span>
-                  <p className="rag-summary__text">{programRag.summary}</p>
+                  <RagSummary
+                    summary={programRag.summary}
+                    items={programRag.results.map((p) => ({ name: p.title }))}
+                    onPick={(i) => scrollToCard(`pg-card-${i + 1}`, i, false)}
+                  />
                 </div>
               )}
 

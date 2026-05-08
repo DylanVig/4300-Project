@@ -180,13 +180,12 @@ def register_enrichment_routes(app):
                 "content": (
                     "You are a strength-and-conditioning coach. Given a centerpiece exercise and a "
                     "pool of available exercises retrieved from the database, output a full "
-                    "complementary workout plan for the day. Include: a brief warmup, 3-4 accessory "
-                    "exercises that target complementary muscle groups or movement patterns, a "
-                    "finisher, and a cooldown. You MUST select all accessory exercises and the "
-                    "finisher exclusively from the provided exercise pool — do not invent exercises "
+                    "complementary workout plan for the day. Include: a brief warmup, 2 accessory "
+                    "exercises that target complementary muscle groups or movement patterns, "
+                    "an optional finisher,and a cooldown. You MUST select all accessory exercises, and "
+                    "the finisherexclusively from the provided exercise pool — do not invent exercises "
                     "not on the list. Match the available equipment. Keep tone direct and practical. "
-                    "Use markdown headings and bullet lists. Do not restate the full instructions "
-                    "for the centerpiece exercise — the user already has them. "
+                    "Use markdown headings and bullet lists. "
                     "For any exercise prescribed for hypertrophy, use a rep range of 8-12."
                 ),
             },

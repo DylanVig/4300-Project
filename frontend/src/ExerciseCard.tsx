@@ -58,6 +58,7 @@ export default function ExerciseCard({
 
   return (
     <article
+      id={`ex-card-${rank}`}
       className={`ex-card ${isTop ? 'ex-card--top' : ''} ${expanded ? 'ex-card--open' : ''} ${isSelected ? 'ex-card--selected' : ''}`}
       onClick={onSelectCard}
     >

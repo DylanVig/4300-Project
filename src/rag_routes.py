@@ -183,11 +183,17 @@ def _summarize_picks(client, original_query, refined_query, picks, line_builder,
     domain_label = "programs" if domain == "program" else "exercises"
     lines = [line_builder(i + 1, p) for i, p in enumerate(picks)]
     listing = "\n".join(lines)
+    name_field = "title" if domain == "program" else "name"
     system = (
         f"You write a 2-3 sentence summary helping a user pick from a ranked "
         f"list of fitness {domain_label}. State which top result fits best and "
         "why, then briefly note 1-2 alternatives and what they would be "
-        "preferred for. Plain prose, no markdown, no lists, no quotes."
+        "preferred for. "
+        f"You MUST refer to each {domain_label[:-1]} by its full {name_field} "
+        "verbatim (exactly as written in the list, including capitalization "
+        "and punctuation) — never use phrases like 'the first result', "
+        "'the second option', or numeric ordinals. "
+        "Plain prose, no markdown, no lists, no quotes."
     )
     user = (
         f"Original query: {original_query}\n"

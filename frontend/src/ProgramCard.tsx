@@ -7,8 +7,8 @@ import type { Program, ScheduleEntry, FormCue } from './types';
 
 const QUALITY_COPY: Record<string, string> = {
   strong: 'STRONG MATCH',
-  moderate: 'MODERATE',
-  weak: 'WEAK',
+  moderate: 'MODERATE MATCH',
+  weak: 'WEAK MATCH',
 };
 
 function TagDots({ score }: { score: number }) {
@@ -57,7 +57,7 @@ export default function ProgramCard({
   ).size;
 
   return (
-    <article className={`pg-card ${isTop ? 'pg-card--top' : ''}`}>
+    <article id={`pg-card-${rank}`} className={`pg-card ${isTop ? 'pg-card--top' : ''}`}>
       <header className="pg-card__head">
         <RankNumeral n={rank} />
         <div className="pg-card__title-wrap">

@@ -122,6 +122,8 @@ button { font-family: inherit; cursor: pointer; }
   text-transform: uppercase;
   margin-bottom: -4px;
 }
+.filters__sub-label--gap { margin-top: 8px; }
+.filter-panel { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
 .rail__section-label {
   font-family: var(--mono);
   font-size: 11px;
@@ -705,6 +707,21 @@ button { font-family: inherit; cursor: pointer; }
   margin: 0;
   font-family: var(--body);
 }
+.rag-summary__link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.rag-summary__link:hover { filter: brightness(1.2); }
+.rag-summary__link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── Welcome / onboarding card ────────────────────────────────────────── */
 

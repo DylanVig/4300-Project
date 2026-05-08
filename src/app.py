@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from dotenv import load_dotenv
 from flask import Flask
 
@@ -58,6 +59,18 @@ def init_db():
             print("Database initialized with episodes and reviews data")
 
 init_db()
+
+
+def _prewarm_program_searcher():
+    try:
+        from retrieval import search_programs
+        search_programs("warmup", k=1)
+    except Exception as e:
+        print(f"[prewarm] program searcher failed: {e}")
+
+
+threading.Thread(target=_prewarm_program_searcher, daemon=True).start()
+
 
 if __name__ == '__main__':
     app.run(debug=True, host="0.0.0.0", port=5001)
