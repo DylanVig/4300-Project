@@ -61,15 +61,16 @@ def init_db():
 init_db()
 
 
-def _prewarm_program_searcher():
+def _prewarm_searchers():
     try:
-        from retrieval import search_programs
+        from retrieval import search_programs, search_reddit
         search_programs("warmup", k=1)
+        search_reddit("warmup", k=1)
     except Exception as e:
-        print(f"[prewarm] program searcher failed: {e}")
+        print(f"[prewarm] failed: {e}")
 
 
-threading.Thread(target=_prewarm_program_searcher, daemon=True).start()
+threading.Thread(target=_prewarm_searchers, daemon=True).start()
 
 
 if __name__ == '__main__':

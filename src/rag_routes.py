@@ -24,6 +24,7 @@ from flask import request, jsonify
 from llm_routes import _get_llm_client, _extract_json
 from retrieval import search as retrieval_search
 from retrieval import search_programs as retrieval_search_programs
+from retrieval import search_reddit as retrieval_search_reddit
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,14 @@ def _refine_query(client, original_query, domain):
             "program goals (hypertrophy, powerlifting, bodybuilding, strength, "
             "endurance, cutting, bulking), periodization terms, split type "
             "(push/pull/legs, upper/lower, full body), experience level"
+        )
+    elif domain == "reddit":
+        vocab_hint = (
+            "sport names (soccer, basketball, football, volleyball, hockey, "
+            "baseball, track, tennis, rugby), coaching concepts (drills, "
+            "periodization, tactics, positioning, conditioning, technique, "
+            "formation, press, zone, man-to-man), age and level (youth, u12, "
+            "u14, high school, college, varsity, elite)"
         )
     else:
         vocab_hint = (
@@ -106,6 +115,15 @@ def _program_candidate_line(idx, pg):
     return (
         f"{idx}. {pg.get('title')} | goal: {goals} | level: {pg.get('level') or '-'} "
         f"| weeks: {weeks if weeks is not None else '-'} | first exercises: {ex_preview}"
+    )
+
+
+def _reddit_candidate_line(idx, p):
+    com_count = len(p.get("top_comments") or [])
+    return (
+        f"{idx}. {p.get('title')} | sport: {p.get('sport') or '-'} "
+        f"| sub: r/{p.get('subreddit') or '-'} | score: {p.get('score', 0)} "
+        f"| comments_indexed: {com_count}"
     )
 
 
@@ -180,21 +198,49 @@ def _summarize_picks(client, original_query, refined_query, picks, line_builder,
     """
     if not picks:
         return ""
-    domain_label = "programs" if domain == "program" else "exercises"
+    if domain == "program":
+        domain_label = "programs"
+        name_field = "title"
+    elif domain == "reddit":
+        domain_label = "discussions"
+        name_field = "title"
+    else:
+        domain_label = "exercises"
+        name_field = "name"
     lines = [line_builder(i + 1, p) for i, p in enumerate(picks)]
     listing = "\n".join(lines)
-    name_field = "title" if domain == "program" else "name"
-    system = (
-        f"You write a 2-3 sentence summary helping a user pick from a ranked "
-        f"list of fitness {domain_label}. State which top result fits best and "
-        "why, then briefly note 1-2 alternatives and what they would be "
-        "preferred for. "
-        f"You MUST refer to each {domain_label[:-1]} by its full {name_field} "
-        "verbatim (exactly as written in the list, including capitalization "
-        "and punctuation) — never use phrases like 'the first result', "
-        "'the second option', or numeric ordinals. "
-        "Plain prose, no markdown, no lists, no quotes."
-    )
+    if domain == "reddit":
+        system = (
+            "You are a professional soccer and basketball coach helping a "
+            "player or coach pick from a ranked list of community discussions "
+            "about drills, tactics, and skill development. In 2-3 sentences, "
+            "name which top discussion best fits the user's goal and what "
+            "drills or coaching ideas it surfaces, then briefly note 1-2 "
+            "alternatives and what they would be useful for instead. "
+            "You MUST refer to each discussion by its full title verbatim "
+            "(exactly as written in the list, including capitalization and "
+            "punctuation) — never use phrases like 'the first result', "
+            "'the second option', or numeric ordinals. "
+            "The title is the text BEFORE the first ' | ' separator on each "
+            "candidate line — never include the metadata fields (sport, sub, "
+            "score, comments_indexed) when quoting it. Quote that title "
+            "portion CHARACTER-FOR-CHARACTER, including emoji, trailing "
+            "punctuation, and capitalization. Do not truncate, do not "
+            "abbreviate, do not paraphrase, do not drop emoji. "
+            "Plain prose, no markdown, no lists, no quotes."
+        )
+    else:
+        system = (
+            f"You write a 2-3 sentence summary helping a user pick from a ranked "
+            f"list of fitness {domain_label}. State which top result fits best and "
+            "why, then briefly note 1-2 alternatives and what they would be "
+            "preferred for. "
+            f"You MUST refer to each {domain_label[:-1]} by its full {name_field} "
+            "verbatim (exactly as written in the list, including capitalization "
+            "and punctuation) — never use phrases like 'the first result', "
+            "'the second option', or numeric ordinals. "
+            "Plain prose, no markdown, no lists, no quotes."
+        )
     user = (
         f"Original query: {original_query}\n"
         f"Refined query: {refined_query}\n\n"
@@ -299,6 +345,43 @@ def register_rag_routes(app):
         summary = _summarize_picks(client, query, refined, final,
                                    _program_candidate_line, domain="program")
 
+        return jsonify({
+            "results": final,
+            "corrected_query": ir_payload.get("corrected_query"),
+            "refined_query": refined,
+            "original_query": query,
+            "summary": summary,
+        })
+
+    @app.route("/api/rag_search_reddit", methods=["POST"])
+    def rag_search_reddit():
+        data = request.get_json(force=True) or {}
+        query = (data.get("query") or "").strip()
+        if not query:
+            return jsonify({
+                "results": [], "corrected_query": None,
+                "refined_query": "", "original_query": "",
+            })
+        raw_method = data.get("method")
+        method = raw_method if raw_method in ("tfidf", "svd") else "tfidf"
+        raw_sports = data.get("sports")
+        sports = [s for s in raw_sports if isinstance(s, str)] if isinstance(raw_sports, list) else None
+        if sports == []:
+            sports = None
+
+        client = _get_llm_client()
+        if client is None:
+            return jsonify({"error": "LLM not configured"}), 503
+
+        refined = _refine_query(client, query, domain="reddit")
+        ir_payload = retrieval_search_reddit(refined, k=CANDIDATE_POOL,
+                                             method=method, sports=sports)
+        candidates = ir_payload.get("results") or []
+        picks = _rerank_candidates(client, query, refined, candidates,
+                                   _reddit_candidate_line)
+        final = [candidates[i] for i in picks]
+        summary = _summarize_picks(client, query, refined, final,
+                                   _reddit_candidate_line, domain="reddit")
         return jsonify({
             "results": final,
             "corrected_query": ir_payload.get("corrected_query"),

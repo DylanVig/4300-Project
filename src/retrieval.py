@@ -26,6 +26,7 @@ Key IR techniques:
       not double-weighted. See data/DATASETS.md for the full data audit.
 """
 import csv
+import html
 import json
 import os
 import re
@@ -278,6 +279,7 @@ def _tokenize_and_stem(text):
 DATA_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'datasets', 'exercises_free_db.json')
 EXERCISE_VIDEOS_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'datasets', 'exercise_videos.json')
 PROGRAMS_CSV_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'datasets', 'programs_cleaned.csv')
+REDDIT_JSON_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'datasets', 'reddit_posts.json')
 COMMON_ENGLISH_PATH = os.path.join(os.path.dirname(__file__), '..', 'data',
                                    'google-10000-english-no-swears.txt')
 
@@ -1449,3 +1451,173 @@ def search_programs(query, k=5, method="tfidf"):
     if _program_searcher is None:
         _program_searcher = ProgramSearcher()
     return _program_searcher.search(query, k=k, method=method)
+
+
+# ---------------------------------------------------------------------------
+# Reddit Discussions search surface
+# ---------------------------------------------------------------------------
+
+REDDIT_FIELD_WEIGHTS = {
+    "title": 3,
+    "sport": 3,
+    "selftext": 1,
+    "comments": 1,
+}
+
+
+def _build_reddit_doc(row):
+    comments_text = " ".join(
+        c.get("body") or "" for c in (row.get("top_comments") or [])
+    )
+    parts = {
+        "title": row.get("title") or "",
+        "sport": row.get("sport") or "",
+        "selftext": row.get("selftext") or "",
+        "comments": comments_text,
+    }
+    out = []
+    for field, weight in REDDIT_FIELD_WEIGHTS.items():
+        text = parts[field]
+        if text:
+            out.extend([text] * weight)
+    return " ".join(out)
+
+
+class RedditSearcher:
+    """TF-IDF + SVD index over Reddit coaching posts."""
+
+    def __init__(self):
+        with open(REDDIT_JSON_PATH, "r", encoding="utf-8") as f:
+            self.posts = json.load(f)
+
+        docs = [_build_reddit_doc(p) for p in self.posts]
+        self.vectorizer = TfidfVectorizer(
+            tokenizer=_tokenize_and_stem,
+            stop_words=None,
+            max_features=10000,
+        )
+        self.tfidf_matrix = self.vectorizer.fit_transform(docs)
+        self.svd, self.svd_matrix_normed = _fit_svd(self.tfidf_matrix)
+        self.stem_to_surface = _build_stem_surface_map(docs)
+
+        sport_cats = sorted({
+            p.get("sport", "").lower().strip()
+            for p in self.posts if p.get("sport")
+        })
+        (self.topic_nmf, self.topic_matrix,
+         self.topic_labels, self.topic_baseline) = _fit_topic_nmf(
+            self.tfidf_matrix, self.vectorizer, self.stem_to_surface,
+            required_labels=sport_cats)
+
+        self.vocab_by_length = {}
+        for term in self.vectorizer.vocabulary_:
+            self.vocab_by_length.setdefault(len(term), []).append(term)
+
+    def search(self, query, k=5, method="tfidf", sports=None):
+        raw_tokens = query.lower().split()
+        corrected_display = []
+        any_corrected = False
+
+        for raw in raw_tokens:
+            if raw in _STOP_WORDS or len(raw) <= 1:
+                corrected_display.append(raw)
+                continue
+            aliased = _apply_alias(raw)
+            if aliased in _ENGLISH_WORDS:
+                if aliased != raw:
+                    corrected_display.append(aliased)
+                    any_corrected = True
+                else:
+                    corrected_display.append(raw)
+                continue
+            stemmed = _stem(aliased)
+            corrected = _correct_token(stemmed, self.vocab_by_length)
+            if corrected != stemmed:
+                corrected_display.append(corrected)
+                any_corrected = True
+            elif aliased != raw:
+                corrected_display.append(aliased)
+                any_corrected = True
+            else:
+                corrected_display.append(raw)
+
+        corrected_query = " ".join(corrected_display)
+        query_vec = self.vectorizer.transform([corrected_query])
+        query_topic_vec = (self.topic_nmf.transform(query_vec)[0]
+                           if method == "svd" else None)
+
+        if method == "svd":
+            scores = _svd_scores(self.svd, self.svd_matrix_normed, query_vec)
+        else:
+            scores = cosine_similarity(query_vec, self.tfidf_matrix).flatten()
+
+        if sports:
+            allowed = {s.lower() for s in sports}
+            for i, p in enumerate(self.posts):
+                if (p.get("sport") or "").lower() not in allowed:
+                    scores[i] = 0.0
+
+        top_indices = np.argsort(scores)[::-1][:k]
+        top_score = float(scores.max()) if scores.size else 0.0
+
+        raw_results = []
+        for idx in top_indices:
+            if scores[idx] <= 0:
+                break
+            post = self.posts[idx]
+            doc_topic_vec = self.topic_matrix[idx]
+            doc_tfidf_vec = self.tfidf_matrix[idx]
+            if method == "svd":
+                topic_hits = _top_topics(query_topic_vec, doc_topic_vec,
+                                         self.topic_baseline)
+                pos_tags = [(self.topic_labels[t], s) for t, s in topic_hits]
+            else:
+                pos_tags = _top_shared_terms(self.vectorizer, query_vec,
+                                              doc_tfidf_vec, self.stem_to_surface)
+            raw_results.append({"idx": idx, "post": post, "pos": pos_tags})
+
+        global_max_pos = max(
+            (s for r in raw_results for _, s in r["pos"] if s > 0), default=1.0
+        )
+
+        results = []
+        for r in raw_results:
+            idx = r["idx"]
+            post = r["post"]
+            tags = [
+                {"label": lbl, "score": round(s * 100.0 / global_max_pos)}
+                for lbl, s in r["pos"] if s > 0
+            ]
+            raw_comments = post.get("top_comments") or []
+            decoded_comments = [
+                {"score": c.get("score", 0), "body": html.unescape(c.get("body") or "")}
+                for c in raw_comments
+            ]
+            results.append({
+                "id": post.get("id"),
+                "title": html.unescape(post.get("title") or ""),
+                "subreddit": post.get("subreddit") or "",
+                "sport": post.get("sport") or "",
+                "permalink": post.get("permalink") or "",
+                "score": post.get("score", 0),
+                "num_comments": post.get("num_comments", 0),
+                "selftext_excerpt": html.unescape((post.get("selftext") or "")[:400]),
+                "top_comments": decoded_comments,
+                "retrieval_score": round(float(scores[idx]), 4),
+                "match_quality": _match_quality(float(scores[idx]), top_score, method),
+                "tags": tags,
+            })
+        return {
+            "results": results,
+            "corrected_query": corrected_query if any_corrected else None,
+        }
+
+
+_reddit_searcher = None
+
+
+def search_reddit(query, k=5, method="tfidf", sports=None):
+    global _reddit_searcher
+    if _reddit_searcher is None:
+        _reddit_searcher = RedditSearcher()
+    return _reddit_searcher.search(query, k=k, method=method, sports=sports)

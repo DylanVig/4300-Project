@@ -10,6 +10,7 @@ from flask import send_from_directory, request, jsonify
 from models import db, Episode, Review
 from retrieval import search as retrieval_search
 from retrieval import search_programs as retrieval_search_programs
+from retrieval import search_reddit as retrieval_search_reddit
 
 # ── AI toggle ────────────────────────────────────────────────────────────────
 #USE_LLM = False
@@ -90,6 +91,20 @@ def register_routes(app):
         raw_method = data.get("method")
         method = raw_method if raw_method in ("tfidf", "svd") else "tfidf"
         return jsonify(retrieval_search_programs(query, k=20, method=method))
+
+    @app.route("/api/search_reddit", methods=["POST"])
+    def search_reddit_route():
+        data = request.get_json(force=True) or {}
+        query = (data.get("query") or "").strip()
+        if not query:
+            return jsonify({"results": [], "corrected_query": None})
+        raw_method = data.get("method")
+        method = raw_method if raw_method in ("tfidf", "svd") else "tfidf"
+        raw_sports = data.get("sports")
+        sports = [s for s in raw_sports if isinstance(s, str)] if isinstance(raw_sports, list) else None
+        if sports == []:
+            sports = None
+        return jsonify(retrieval_search_reddit(query, k=20, method=method, sports=sports))
 
     if USE_LLM:
         from llm_routes import register_chat_route, register_enrichment_routes

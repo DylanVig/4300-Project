@@ -76,6 +76,28 @@ export const DIFFICULTY_OPTIONS: ['beginner', 'intermediate', 'expert'] = [
   'expert',
 ];
 
+export interface RedditComment {
+  score: number;
+  body: string;
+}
+
+export interface RedditPost {
+  id: string;
+  title: string;
+  subreddit: string;
+  sport: string;
+  permalink: string;
+  score: number;
+  num_comments: number;
+  selftext_excerpt: string;
+  top_comments: RedditComment[];
+  retrieval_score: number;
+  match_quality?: MatchQuality;
+  tags?: Tag[];
+}
+
+export const SPORT_OPTIONS: string[] = ['basketball', 'soccer'];
+
 export interface FormCue {
   form_cues: string[];
   safety: string;

@@ -1,20 +1,22 @@
 import { useState, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import type { Exercise, FormCue, Program } from './types';
+import type { Exercise, FormCue, Program, RedditPost } from './types';
 import {
   EQUIPMENT_OPTIONS,
   DIFFICULTY_OPTIONS,
   MUSCLE_OPTIONS,
+  SPORT_OPTIONS,
 } from './types';
 import ExerciseCard, { type PlanState } from './ExerciseCard';
 import ProgramCard from './ProgramCard';
+import DiscussionCard from './DiscussionCard';
 import RagSummary from './RagSummary';
 import MuscleGraph from './MuscleGraph';
 import MuscleRadar from './MuscleRadar';
 import MuscleMap from './MuscleMap';
 import './App.css';
 
-type Tab = 'exercises' | 'programs';
+type Tab = 'exercises' | 'programs' | 'sports';
 type Method = 'tfidf' | 'svd';
 type ResultsView = 'ir' | 'rag';
 
@@ -34,6 +36,13 @@ const emptyExerciseRag: RagState<Exercise> = {
   error: null,
 };
 const emptyProgramRag: RagState<Program> = {
+  results: [],
+  refinedQuery: '',
+  summary: '',
+  loading: false,
+  error: null,
+};
+const emptySportsRag: RagState<RedditPost> = {
   results: [],
   refinedQuery: '',
   summary: '',
@@ -70,6 +79,14 @@ export default function App() {
   const [programRag, setProgramRag] = useState<RagState<Program>>(emptyProgramRag);
   const [openCueKey, setOpenCueKey] = useState<string | null>(null);
   const [topCues, setTopCues] = useState<Record<string, FormCue>>({});
+
+  const [sportsSearchTerm, setSportsSearchTerm] = useState<string>('');
+  const [sportsResults, setSportsResults] = useState<RedditPost[]>([]);
+  const [sportsMethod, setSportsMethod] = useState<Method>('tfidf');
+  const [sportsLoading, setSportsLoading] = useState<boolean>(false);
+  const [sportsView, setSportsView] = useState<ResultsView>('ir');
+  const [sportsRag, setSportsRag] = useState<RagState<RedditPost>>(emptySportsRag);
+  const [sportsFilter, setSportsFilter] = useState<string[]>([]);
 
   useEffect(() => {
     fetch('/api/config')
@@ -264,6 +281,80 @@ export default function App() {
     }
   };
 
+  const runSportsSearch = async (
+    query: string,
+    methodOverride?: Method,
+    sportsOverride?: string[],
+  ) => {
+    if (!query.trim()) {
+      setSportsResults([]);
+      return;
+    }
+    const method = methodOverride ?? sportsMethod;
+    const sports = sportsOverride ?? sportsFilter;
+    const body: Record<string, unknown> = { query, method };
+    if (sports.length > 0) body.sports = sports;
+    setSportsLoading(true);
+    try {
+      const res = await fetch('/api/search_reddit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      setSportsResults(data.results ?? []);
+    } catch (err) {
+      console.error('sports search failed', err);
+      setSportsResults([]);
+    } finally {
+      setSportsLoading(false);
+    }
+  };
+
+  const runRagSportsSearch = async (
+    query: string,
+    methodOverride?: Method,
+    sportsOverride?: string[],
+  ) => {
+    if (!query.trim()) {
+      setSportsRag(emptySportsRag);
+      return;
+    }
+    const method = methodOverride ?? sportsMethod;
+    const sports = sportsOverride ?? sportsFilter;
+    const body: Record<string, unknown> = { query, method };
+    if (sports.length > 0) body.sports = sports;
+    setSportsRag((s) => ({ ...s, loading: true, error: null }));
+    try {
+      const res = await fetch('/api/rag_search_reddit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        setSportsRag({
+          results: [], refinedQuery: '', summary: '', loading: false,
+          error: res.status === 503 ? 'LLM not configured' : `Request failed (${res.status})`,
+        });
+        return;
+      }
+      const data = await res.json();
+      setSportsRag({
+        results: data.results ?? [],
+        refinedQuery: data.refined_query ?? '',
+        summary: data.summary ?? '',
+        loading: false,
+        error: null,
+      });
+    } catch (err) {
+      console.error('rag sports search failed', err);
+      setSportsRag({
+        results: [], refinedQuery: '', summary: '', loading: false,
+        error: err instanceof Error ? err.message : 'RAG search failed',
+      });
+    }
+  };
+
   const handleGeneratePlan = async (exercise: Exercise) => {
     setPlanState({ loading: true, text: '', error: null });
     setPlanModalOpen(true);
@@ -338,6 +429,25 @@ export default function App() {
     }
   };
 
+  const triggerSportsSearch = (
+    query: string,
+    methodOverride?: Method,
+    sportsOverride?: string[],
+  ) => {
+    runSportsSearch(query, methodOverride, sportsOverride);
+    if (useLlm && sportsView === 'rag' && query.trim()) {
+      runRagSportsSearch(query, methodOverride, sportsOverride);
+    }
+  };
+
+  const toggleSportFilter = (s: string) => {
+    const next = sportsFilter.includes(s)
+      ? sportsFilter.filter((x) => x !== s)
+      : [...sportsFilter, s];
+    setSportsFilter(next);
+    if (sportsSearchTerm.trim()) triggerSportsSearch(sportsSearchTerm, undefined, next);
+  };
+
   const toggleEquipment = (v: string) => {
     const next = selectedEquipment.includes(v)
       ? selectedEquipment.filter((x) => x !== v)
@@ -363,9 +473,12 @@ export default function App() {
     if (activeTab === 'exercises') {
       setExerciseMethod(m);
       if (searchTerm.trim()) triggerExerciseSearch(searchTerm, { method: m });
-    } else {
+    } else if (activeTab === 'programs') {
       setProgramMethod(m);
       if (programSearchTerm.trim()) triggerProgramSearch(programSearchTerm, m);
+    } else {
+      setSportsMethod(m);
+      if (sportsSearchTerm.trim()) triggerSportsSearch(sportsSearchTerm, m);
     }
   };
 
@@ -373,15 +486,18 @@ export default function App() {
     if (activeTab === 'exercises') {
       setExerciseView(v);
       setSelectedExerciseIndex(0);
-      if (v === 'rag' && useLlm && searchTerm.trim() &&
-          exerciseRag.results.length === 0 && !exerciseRag.loading) {
+      if (v === 'rag' && useLlm && searchTerm.trim()) {
         runRagSearch(searchTerm);
       }
-    } else {
+    } else if (activeTab === 'programs') {
       setProgramView(v);
-      if (v === 'rag' && useLlm && programSearchTerm.trim() &&
-          programRag.results.length === 0 && !programRag.loading) {
+      if (v === 'rag' && useLlm && programSearchTerm.trim()) {
         runRagProgramSearch(programSearchTerm);
+      }
+    } else {
+      setSportsView(v);
+      if (v === 'rag' && useLlm && sportsSearchTerm.trim()) {
+        runRagSportsSearch(sportsSearchTerm);
       }
     }
   };
@@ -397,7 +513,10 @@ export default function App() {
     });
   };
 
-  const currentMethod = activeTab === 'exercises' ? exerciseMethod : programMethod;
+  const currentMethod =
+    activeTab === 'exercises' ? exerciseMethod
+    : activeTab === 'programs' ? programMethod
+    : sportsMethod;
 
   const displayedExercises = exerciseView === 'rag' ? exerciseRag.results : exercises;
   const selectedExercise = displayedExercises[selectedExerciseIndex] ?? null;
@@ -408,16 +527,29 @@ export default function App() {
       <div className="welcome-card__rule" />
       <p className="welcome-card__body">
         Describe a fitness goal and we&apos;ll return the top{' '}
-        <strong>{activeTab === 'exercises' ? 'exercises' : 'workout programs'}</strong>{' '}
+        <strong>
+          {activeTab === 'exercises'
+            ? 'exercises'
+            : activeTab === 'programs'
+              ? 'workout programs'
+              : 'coaching discussions'}
+        </strong>{' '}
         ranked by relevance to your query.
       </p>
       <ul className="welcome-card__hints">
         <li>Switch <strong>KEYWORD ↔ SEMANTIC</strong> to compare retrieval methods</li>
         {useLlm && <li>Use <strong>IR + RAG</strong> for LLM-assisted reranking</li>}
         {activeTab === 'exercises' && <li>Filter by equipment, difficulty, or injuries</li>}
+        {activeTab === 'sports' && <li>Filter by <strong>sport</strong> (soccer · basketball)</li>}
       </ul>
       <div className="welcome-card__try">
-        Try: &ldquo;{activeTab === 'exercises' ? 'improve vertical jump' : '8 week hypertrophy'}&rdquo;
+        Try: &ldquo;
+        {activeTab === 'exercises'
+          ? 'improve vertical jump'
+          : activeTab === 'programs'
+            ? '8 week hypertrophy'
+            : 'youth soccer pressing triggers'}
+        &rdquo;
       </div>
     </div>
   );
@@ -449,6 +581,14 @@ export default function App() {
           >
             <span className="railtab__idx">02</span>
             <span className="railtab__name">PROGRAMS</span>
+          </button>
+          <button
+            type="button"
+            className={`railtab ${activeTab === 'sports' ? 'is-active' : ''}`}
+            onClick={() => setActiveTab('sports')}
+          >
+            <span className="railtab__idx">03</span>
+            <span className="railtab__name">SPORTS</span>
           </button>
         </div>
 
@@ -483,15 +623,24 @@ export default function App() {
             </svg>
             <textarea
               rows={2}
-              value={activeTab === 'exercises' ? searchTerm : programSearchTerm}
+              value={
+                activeTab === 'exercises'
+                  ? searchTerm
+                  : activeTab === 'programs'
+                    ? programSearchTerm
+                    : sportsSearchTerm
+              }
               placeholder={
                 activeTab === 'exercises'
                   ? 'e.g. improve vertical jump'
-                  : 'e.g. 8 week hypertrophy'
+                  : activeTab === 'programs'
+                    ? 'e.g. 8 week hypertrophy'
+                    : 'e.g. youth soccer pressing triggers'
               }
               onChange={(e) => {
                 if (activeTab === 'exercises') setSearchTerm(e.target.value);
-                else setProgramSearchTerm(e.target.value);
+                else if (activeTab === 'programs') setProgramSearchTerm(e.target.value);
+                else setSportsSearchTerm(e.target.value);
               }}
               onInput={(e) => {
                 const el = e.currentTarget;
@@ -502,7 +651,8 @@ export default function App() {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   if (activeTab === 'exercises') triggerExerciseSearch(searchTerm);
-                  else triggerProgramSearch(programSearchTerm);
+                  else if (activeTab === 'programs') triggerProgramSearch(programSearchTerm);
+                  else triggerSportsSearch(sportsSearchTerm);
                 }
               }}
             />
@@ -513,7 +663,9 @@ export default function App() {
             onClick={() =>
               activeTab === 'exercises'
                 ? triggerExerciseSearch(searchTerm)
-                : triggerProgramSearch(programSearchTerm)
+                : activeTab === 'programs'
+                  ? triggerProgramSearch(programSearchTerm)
+                  : triggerSportsSearch(sportsSearchTerm)
             }
           >
             <span>RUN SEARCH</span>
@@ -614,6 +766,24 @@ export default function App() {
           </>
         )}
 
+        {activeTab === 'sports' && (
+          <div className="rail__section">
+            <div className="rail__section-label">SPORT</div>
+            <div className="chip-grid">
+              {SPORT_OPTIONS.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  className={`chip ${sportsFilter.includes(s) ? 'is-active' : ''}`}
+                  onClick={() => toggleSportFilter(s)}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {useLlm && activeTab === 'exercises' && (
           <div className="rail__section">
             <div className="rail__section-label">SESSION PLAN</div>
@@ -653,7 +823,7 @@ export default function App() {
       {/* ─── MAIN ───────────────────────────────────────────────────── */}
       <main className="main">
         {activeTab === 'exercises' ? (
-          <div className="workspace workspace--exercises">
+          <div className="workspace workspace--exercises" data-tab="exercises">
             <section className="results">
               <header className="results__head">
                 <div className="results__head-row">
@@ -841,7 +1011,7 @@ export default function App() {
               </section>
             </div>
           </div>
-        ) : (
+        ) : activeTab === 'programs' ? (
           <div className="workspace workspace--programs">
             <section className="results results--full">
               <header className="results__head">
@@ -964,6 +1134,131 @@ export default function App() {
                   ))}
                   {programRag.results.length === 0 && !programRag.error && (
                     programSearchTerm.trim() ? (
+                      <div className="empty">
+                        <div className="empty__icon">◎</div>
+                        <p>Run a search to see IR + RAG results.</p>
+                      </div>
+                    ) : welcomeCard
+                  )}
+                </div>
+              )}
+            </section>
+          </div>
+        ) : (
+          <div className="workspace workspace--sports">
+            <section className="results results--full">
+              <header className="results__head">
+                <div className="results__head-row">
+                  <div>
+                    <div className="results__label">SPORTS</div>
+                    <h2 className="results__title">
+                      <span className="results__count">
+                        {sportsView === 'rag' ? sportsRag.results.length : sportsResults.length}
+                      </span>
+                      <span>discussions ranked by</span>
+                      <span className="results__method">
+                        {sportsMethod === 'tfidf' ? 'KEYWORD RETRIEVAL' : 'SEMANTIC RETRIEVAL'}
+                      </span>
+                    </h2>
+                  </div>
+                  <div className="results__query">
+                    <span className="results__query-label">QUERY</span>
+                    <span className="results__query-text">"{sportsSearchTerm}"</span>
+                  </div>
+                </div>
+                <div className="viewtabs">
+                  <button
+                    type="button"
+                    className={`viewtab ${sportsView === 'ir' ? 'is-active' : ''}`}
+                    onClick={() => changeView('ir')}
+                  >
+                    IR
+                  </button>
+                  <button
+                    type="button"
+                    className={`viewtab ${sportsView === 'rag' ? 'is-active' : ''}`}
+                    onClick={() => changeView('rag')}
+                  >
+                    IR + RAG
+                  </button>
+                </div>
+              </header>
+
+              {sportsView === 'rag' && useLlm && (sportsRag.refinedQuery || sportsRag.loading || sportsRag.error) && (
+                <div className="refined-query">
+                  <div className="refined-query__row">
+                    <span className="refined-query__label">ORIGINAL</span>
+                    <span className="refined-query__text">{sportsSearchTerm || '—'}</span>
+                  </div>
+                  <div className="refined-query__row">
+                    <span className="refined-query__label">REFINED</span>
+                    <span className="refined-query__text refined-query__text--accent">
+                      {sportsRag.loading
+                        ? 'refining query…'
+                        : sportsRag.error
+                          ? `(error: ${sportsRag.error})`
+                          : sportsRag.refinedQuery || '—'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {sportsView === 'rag' && useLlm && !sportsRag.loading && sportsRag.summary && (
+                <div className="rag-summary">
+                  <span className="rag-summary__label">AI SUMMARY</span>
+                  <RagSummary
+                    summary={sportsRag.summary}
+                    items={sportsRag.results.map((p) => ({ name: p.title }))}
+                    onPick={(i) => scrollToCard(`disc-card-${i + 1}`, i, false)}
+                  />
+                </div>
+              )}
+
+              {sportsView === 'ir' && sportsLoading ? (
+                <div className="loading">
+                  <div className="loading__spinner" />
+                  <p>
+                    Searching discussions index…
+                    <br />
+                    <small>first run may take a few seconds</small>
+                  </p>
+                </div>
+              ) : sportsView === 'rag' && sportsRag.loading ? (
+                <div className="loading">
+                  <div className="loading__spinner" />
+                  <p>Refining query &amp; reranking with LLM…</p>
+                </div>
+              ) : sportsView === 'ir' ? (
+                <div className="results__list">
+                  {sportsResults.map((p, i) => (
+                    <DiscussionCard
+                      key={`${p.id}-${i}`}
+                      post={p}
+                      rank={i + 1}
+                      isTop={i === 0}
+                    />
+                  ))}
+                  {sportsResults.length === 0 && (
+                    sportsSearchTerm.trim() ? (
+                      <div className="empty">
+                        <div className="empty__icon">◎</div>
+                        <p>No results. Try a different query or sport filter.</p>
+                      </div>
+                    ) : welcomeCard
+                  )}
+                </div>
+              ) : (
+                <div className="results__list">
+                  {sportsRag.results.map((p, i) => (
+                    <DiscussionCard
+                      key={`rag-${p.id}-${i}`}
+                      post={p}
+                      rank={i + 1}
+                      isTop={i === 0}
+                    />
+                  ))}
+                  {sportsRag.results.length === 0 && !sportsRag.error && (
+                    sportsSearchTerm.trim() ? (
                       <div className="empty">
                         <div className="empty__icon">◎</div>
                         <p>Run a search to see IR + RAG results.</p>
